@@ -7,9 +7,6 @@ import time
 from datetime import datetime
 from webdriver_manager.chrome import ChromeDriverManager
 from fake_useragent import UserAgent
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from concurrent.futures import ThreadPoolExecutor
 
 options = Options()
 options.add_argument("--disable-gpu")
@@ -33,79 +30,85 @@ def scroll_down_page():
             break
         last_height = new_height
 
-# we must use multi threading to speed up the scraping process
-def scrape_products(timestamp,item_url,product ):
+def scrape_product(product, timestamp):
+    """Scrape a single product WebElement. Returns a dict."""
     try:
-        title = product.find_element(By.CSS_SELECTOR, 'span.ebayui-ellipsis-3').text.strip()
+        title = product.find_element(By.CSS_SELECTOR, 'span[itemprop="name"]').text.strip()
     except:
         title = "N/A"
-    # discounted price
+
     try:
         price = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans').text.strip()
     except:
         price = "N/A"
 
-    # original price
     try:
-        original_price = product.find_element(By.CSS_SELECTOR, 'span.itemtile-price-strikethrough').text.strip()
+        original_price = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans--STRIKETHROUGH').text.strip()
     except:
         original_price = "N/A"
 
-    # shipping details
     try:
-        shipping = product.find_element(By.CSS_SELECTOR, 'span.s-item__shipping').text.strip()
+        shipping = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans--SECONDARY').text.strip()
     except:
         shipping = "N/A"
-            
-    return{
-            "timestamp": timestamp,
-            "title": title,
-            "price": price,
-            "original price": original_price,
-            "Shipping": shipping,
+
+    try:
+        item_url = product.find_element(By.CSS_SELECTOR, 'a[itemprop="url"]').get_attribute('href')
+    except:
+        item_url = "N/A"
+
+    return {
+        "timestamp": timestamp,
+        "title": title,
+        "price": price,
+        "original price": original_price,
+        "shipping": shipping,
+        "item url": item_url
     }
 
 def scrape_product_data():  
-    bitcoin_data = []
+    rows = []
     driver.get(URL)
     time.sleep(3)
-    scroll_down_page()  
-    try:
-        # Capture timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        item_url = driver.find_element(By.CSS_SELECTOR, 'a[itemprop="url"]').get_attribute('href')
+    scroll_down_page()
 
-        products = driver.find_elements(By.CSS_SELECTOR,  'div[itemscope][itemtype="https://schema.org/Product"]')
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(scrape_products, products))
-        bitcoin_data.extend(list(results))
-        return bitcoin_data
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        products = driver.find_elements(By.CSS_SELECTOR, 'div[itemscope][itemtype="https://schema.org/Product"]')
+
+        # Sequential (safe) scraping of elements
+        for p in products:
+            rows.append(scrape_product(p, timestamp))
+
+        return rows
+
     except Exception as e:
         print("Error occurred:", e)
         return None
 
-def save_to_csv(data):
+def save_to_csv(list_of_dicts):
     file_name = "ebay_tech_deals.csv"
     try:
-        df = pd.read_csv(file_name)
+        df_existing = pd.read_csv(file_name)
     except FileNotFoundError:
-        df = pd.DataFrame(columns=[
+        df_existing = pd.DataFrame(columns=[
             "timestamp", "title", "price", "original price", "shipping", "item url"
         ])
 
-    new_row = pd.DataFrame([data])
+    df_new = pd.DataFrame(list_of_dicts)
 
-    df = pd.concat([df, new_row], ignore_index=True)
-
-    df.to_csv(file_name, index=False)
+    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+    df_combined.to_csv(file_name, index=False)
 
 if __name__ == "__main__":
-    scraped_data = scrape_product_data()
+    try:
+        scraped_data = scrape_product_data()
 
-    if scraped_data:
-        save_to_csv(scraped_data)
-        print("Data saved to ebay_tech_deals.csv")
-    else:
-        print("Failed to scrape data.")
+        if scraped_data:
+            save_to_csv(scraped_data)
+            print("Data saved to ebay_tech_deals.csv")
+        else:
+            print("Failed to scrape data or no products found.")
 
-    driver.quit()
+    finally:
+        driver.quit()
