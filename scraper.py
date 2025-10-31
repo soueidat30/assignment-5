@@ -2,113 +2,111 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
 import time
 from datetime import datetime
-from webdriver_manager.chrome import ChromeDriverManager
-from fake_useragent import UserAgent
+import os
 
+# -----------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------
+url = "https://www.ebay.com/globaldeals/tech"
+csv_file = "ebay_tech_deals.csv"
+
+# -----------------------------------------------------------
+# SETUP SELENIUM (Headless for silent background execution)
+# -----------------------------------------------------------
 options = Options()
+options.add_argument("--headless")
 options.add_argument("--disable-gpu")
 options.add_argument("--window-size=1920,1080")
+options.add_argument("--disable-blink-features=AutomationControlled")
+options.add_argument("--no-sandbox")
 
-ua = UserAgent()
-options.add_argument(f"user-agent={ua.random}")
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+driver.get(url)
 
-service = Service(ChromeDriverManager().install())
-driver = webdriver.Chrome(service=service, options=options)
+# -----------------------------------------------------------
+# SCROLL TO LOAD ALL PRODUCTS
+# -----------------------------------------------------------
+last_height = driver.execute_script("return document.body.scrollHeight")
+scroll_pause_time = 2
 
-URL = "https://www.ebay.com/globaldeals/tech"
+while True:
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(scroll_pause_time)
+    new_height = driver.execute_script("return document.body.scrollHeight")
+    if new_height == last_height:
+        break
+    last_height = new_height
 
-def scroll_down_page():
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    while True:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(2)
-        new_height = driver.execute_script("return document.body.scrollHeight")
-        if new_height == last_height:
-            break
-        last_height = new_height
+# -----------------------------------------------------------
+# WAIT FOR PRODUCT ELEMENTS
+# -----------------------------------------------------------
+WebDriverWait(driver, 20).until(
+    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-listing-id]"))
+)
 
-def scrape_product(product, timestamp):
-    """Scrape a single product WebElement. Returns a dict."""
+# -----------------------------------------------------------
+# EXTRACT PRODUCT DATA
+# -----------------------------------------------------------
+products = driver.find_elements(By.CSS_SELECTOR, "[data-listing-id]")
+scraped_data = []
+
+for product in products:
     try:
-        title = product.find_element(By.CSS_SELECTOR, 'span[itemprop="name"]').text.strip()
+        title = product.find_element(By.CSS_SELECTOR, "h3.dne-itemtile-title").text.strip()
     except:
-        title = "N/A"
-
-    try:
-        price = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans').text.strip()
-    except:
-        price = "N/A"
-
-    try:
-        original_price = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans--STRIKETHROUGH').text.strip()
-    except:
-        original_price = "N/A"
-
-    try:
-        shipping = product.find_element(By.CSS_SELECTOR, 'span.ux-textspans--SECONDARY').text.strip()
-    except:
-        shipping = "N/A"
+        title = None
 
     try:
-        item_url = product.find_element(By.CSS_SELECTOR, 'a[itemprop="url"]').get_attribute('href')
+        price = product.find_element(By.CSS_SELECTOR, ".dne-itemtile-price").text.strip()
     except:
-        item_url = "N/A"
+        price = None
 
-    return {
-        "timestamp": timestamp,
+    try:
+        original_price = product.find_element(By.CSS_SELECTOR, ".itemtile-price-strikethrough").text.strip()
+    except:
+        original_price = None
+
+    try:
+       shipping_cost = product.find_element(By.ID, "fshippingCost").text.strip()
+    except:
+       shipping_cost = None
+
+    try:
+       shipping_location = product.find_element(By.CSS_SELECTOR, ".sh-col").text.strip()
+    except:
+       shipping_location = None
+    shipping_full = f"{shipping_cost} | {shipping_location}"
+
+    try:
+        item_url = product.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
+    except:
+        item_url = None
+
+    scraped_data.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "title": title,
         "price": price,
-        "original price": original_price,
-        "shipping": shipping,
-        "item url": item_url
-    }
+        "original_price": original_price,
+        "shipping": shipping_full,
+        "item_url": item_url
+    })
 
-def scrape_product_data():  
-    rows = []
-    driver.get(URL)
-    time.sleep(3)
-    scroll_down_page()
+# -----------------------------------------------------------
+# SAVE TO CSV (Append if file exists)
+# -----------------------------------------------------------
+df = pd.DataFrame(scraped_data)
+if os.path.exists(csv_file):
+    df.to_csv(csv_file, mode='a', index=False, header=False, encoding='utf-8-sig')
+else:
+    df.to_csv(csv_file, index=False, encoding='utf-8-sig')
 
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        products = driver.find_elements(By.CSS_SELECTOR, 'div[itemscope][itemtype="https://schema.org/Product"]')
+driver.quit()
 
-        # Sequential (safe) scraping of elements
-        for p in products:
-            rows.append(scrape_product(p, timestamp))
-
-        return rows
-
-    except Exception as e:
-        print("Error occurred:", e)
-        return None
-
-def save_to_csv(list_of_dicts):
-    file_name = "ebay_tech_deals.csv"
-    try:
-        df_existing = pd.read_csv(file_name)
-    except FileNotFoundError:
-        df_existing = pd.DataFrame(columns=[
-            "timestamp", "title", "price", "original price", "shipping", "item url"
-        ])
-
-    df_new = pd.DataFrame(list_of_dicts)
-
-    df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-    df_combined.to_csv(file_name, index=False)
-
-if __name__ == "__main__":
-    try:
-        scraped_data = scrape_product_data()
-
-        if scraped_data:
-            save_to_csv(scraped_data)
-            print("Data saved to ebay_tech_deals.csv")
-        else:
-            print("Failed to scrape data or no products found.")
-
-    finally:
-        driver.quit()
+print(f"✅ Scraping completed. {len(scraped_data)} products saved to '{csv_file}'.")
